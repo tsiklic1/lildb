@@ -1,0 +1,7 @@
+[workspace]
+members = ["crates/*"]
+
+[workspace.dependencies]
+miette = "7.6.0"
+serde = "1.0.228"
+thiserror = "2.0.18"
