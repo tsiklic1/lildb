@@ -7,3 +7,4 @@ edition = "2021"
 miette = { workspace = true, features = ["fancy"] }
 rustyline = { version = "11.0.0", features = ["derive"] }
 tabled = "0.10.0"
+anyhow = "1.0.68"                                # error handling
