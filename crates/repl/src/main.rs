@@ -3,6 +3,8 @@ use std::io::{self, BufRead, Write};
 fn main() {
     let stdin = io::stdin();
 
+    let mut table = new_table();
+
     loop {
         print!("lildb > ");
         io::stdout().flush().unwrap();
@@ -23,7 +25,7 @@ fn main() {
                 let prepare_result = prepare_statement(command);
                 match prepare_result {
                     Ok(statement) => {
-                        execute_statement(statement);
+                        execute_statement(statement, &mut table);
                     }
                     Err(()) => println!("Unrecognized statement keyword: {}", command),
                 }
@@ -112,10 +114,14 @@ fn row_slot(table: &mut Table, row_num: usize) -> &mut [u8] {
     &mut page[byte_offset..(byte_offset + (ROW_SIZE as usize))]
 }
 
-fn execute_statement(statement: Statement) {
+fn execute_statement(statement: Statement, table: &mut Table) {
     match statement.statement_type {
-        StatementType::Insert => println!("Here we will do the insert"),
-        StatementType::Select => println!("Here we will do the select"),
+        StatementType::Insert => {
+            execute_insert(&statement, table);
+        }
+        StatementType::Select => {
+            execute_select(&statement, table);
+        }
     }
 }
 
@@ -130,7 +136,6 @@ fn deserialize_row(source: &[u8], destination: &mut Row) {
     destination.username = source[USERNAME_OFFSET..EMAIL_OFFSET].try_into().unwrap();
     destination.email = source[EMAIL_OFFSET..ROW_SIZE].try_into().unwrap();
 }
-
 
 fn fixed_bytes<const N: usize>(input: &str) -> Result<[u8; N], ()> {
     let bytes = input.as_bytes();
@@ -156,12 +161,30 @@ fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), ()> {
     Ok(())
 }
 
+fn print_row(row: &Row) {
+    let id = row.id;
+    let username = std::str::from_utf8(&row.username).unwrap();
+    let email = std::str::from_utf8(&row.email).unwrap();
+    println!("{} {} {}", id, username, email)
+}
 
 fn execute_select(statement: &Statement, table: &mut Table) -> Result<(), ()> {
+    let mut row: Row = Row {
+        id: 0,
+        username: [0; USERNAME_SIZE],
+        email: [0; EMAIL_SIZE],
+    };
     for i in 0..table.num_rows {
-        deserialize_row()
-        print_row()
+        deserialize_row(row_slot(table, i as usize), &mut row);
+        print_row(&row);
     }
 
     Ok(())
+}
+
+fn new_table() -> Box<Table> {
+    Box::new(Table {
+        num_rows: 0,
+        pages: std::array::from_fn(|_| None),
+    })
 }
