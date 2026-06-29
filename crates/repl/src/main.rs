@@ -125,6 +125,13 @@ fn serialize_row(source: &Row, destination: &mut [u8]) {
     destination[EMAIL_OFFSET..ROW_SIZE].copy_from_slice(&source.email);
 }
 
+fn deserialize_row(source: &[u8], destination: &mut Row) {
+    destination.id = u32::from_le_bytes(source[ID_OFFSET..USERNAME_OFFSET].try_into().unwrap());
+    destination.username = source[USERNAME_OFFSET..EMAIL_OFFSET].try_into().unwrap();
+    destination.email = source[EMAIL_OFFSET..ROW_SIZE].try_into().unwrap();
+}
+
+
 fn fixed_bytes<const N: usize>(input: &str) -> Result<[u8; N], ()> {
     let bytes = input.as_bytes();
     if bytes.len() > N {
@@ -146,5 +153,15 @@ fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), ()> {
 
     serialize_row(row_to_insert, slot);
     table.num_rows += 1;
+    Ok(())
+}
+
+
+fn execute_select(statement: &Statement, table: &mut Table) -> Result<(), ()> {
+    for i in 0..table.num_rows {
+        deserialize_row()
+        print_row()
+    }
+
     Ok(())
 }
