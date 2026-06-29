@@ -1,11 +1,4 @@
-use std::{
-    io::{self, BufRead, Write},
-    os::macos::raw::stat,
-};
-
-use anyhow::Error;
-
-use crate::StatementType::Insert;
+use std::io::{self, BufRead, Write};
 
 fn main() {
     let stdin = io::stdin();
@@ -42,24 +35,34 @@ fn main() {
 fn prepare_statement(input: &str) -> Result<Statement, ()> {
     let mut statement = Statement {
         statement_type: StatementType::Select,
+        row_to_insert: Row {
+            id: 0,
+            username: [0; USERNAME_SIZE],
+            email: [0; EMAIL_SIZE],
+        },
     };
     if input.starts_with("insert") {
-        statement.statement_type = StatementType::Insert;
+        let mut parts = input.trim().split_whitespace();
+        let _command = parts.next();
+        let id = parts.next().ok_or(())?;
+        let username = parts.next().ok_or(())?;
+        let email = parts.next().ok_or(())?;
+
+        let statement = Statement {
+            statement_type: StatementType::Insert,
+            row_to_insert: Row {
+                id: id.parse::<u32>().map_err(|_| ())?,
+                username: fixed_bytes(username)?,
+                email: fixed_bytes(email)?,
+            },
+        };
         return Ok(statement);
     }
     if input.starts_with("select") {
         statement.statement_type = StatementType::Select;
         return Ok(statement);
     }
-    println!("abc");
     Err(())
-}
-
-fn execute_statement(statement: Statement) {
-    match statement.statement_type {
-        StatementType::Insert => println!("Here we will do the insert"),
-        StatementType::Select => println!("Here we will do the select"),
-    }
 }
 
 enum StatementType {
@@ -69,4 +72,79 @@ enum StatementType {
 
 struct Statement {
     statement_type: StatementType,
+    row_to_insert: Row,
+}
+
+struct Row {
+    id: u32,
+    username: [u8; USERNAME_SIZE],
+    email: [u8; EMAIL_SIZE],
+}
+
+struct Table {
+    num_rows: u32,
+    pages: [Option<Box<[u8; PAGE_SIZE]>>; TABLE_MAX_PAGES],
+}
+
+const ID_SIZE: usize = 4;
+const USERNAME_SIZE: usize = 32;
+const EMAIL_SIZE: usize = 255;
+const ID_OFFSET: usize = 0;
+const USERNAME_OFFSET: usize = ID_OFFSET + ID_SIZE;
+const EMAIL_OFFSET: usize = USERNAME_OFFSET + USERNAME_SIZE;
+const ROW_SIZE: usize = ID_SIZE + USERNAME_SIZE + EMAIL_SIZE;
+
+const PAGE_SIZE: usize = 4096; //its like this in sqlite
+const TABLE_MAX_PAGES: usize = 100;
+const ROWS_PER_PAGE: usize = PAGE_SIZE / ROW_SIZE;
+
+fn row_slot(table: &mut Table, row_num: usize) -> &mut [u8] {
+    let page_num = row_num / ROWS_PER_PAGE;
+    if table.pages[page_num].is_none() {
+        table.pages[page_num] = Some(Box::new([0; PAGE_SIZE]));
+    }
+
+    let page = table.pages[page_num].as_mut().unwrap();
+
+    let row_offset = row_num % ROWS_PER_PAGE;
+    let byte_offset = row_offset * ROW_SIZE as usize;
+
+    &mut page[byte_offset..(byte_offset + (ROW_SIZE as usize))]
+}
+
+fn execute_statement(statement: Statement) {
+    match statement.statement_type {
+        StatementType::Insert => println!("Here we will do the insert"),
+        StatementType::Select => println!("Here we will do the select"),
+    }
+}
+
+fn serialize_row(source: &Row, destination: &mut [u8]) {
+    destination[ID_OFFSET..USERNAME_OFFSET].copy_from_slice(&source.id.to_le_bytes());
+    destination[USERNAME_OFFSET..EMAIL_OFFSET].copy_from_slice(&source.username);
+    destination[EMAIL_OFFSET..ROW_SIZE].copy_from_slice(&source.email);
+}
+
+fn fixed_bytes<const N: usize>(input: &str) -> Result<[u8; N], ()> {
+    let bytes = input.as_bytes();
+    if bytes.len() > N {
+        return Err(());
+    }
+
+    let mut buffer = [0; N];
+    buffer[..bytes.len()].copy_from_slice(bytes);
+    Ok(buffer)
+}
+
+fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), ()> {
+    if table.num_rows >= (ROWS_PER_PAGE * TABLE_MAX_PAGES) as u32 {
+        return Err(());
+    }
+
+    let row_to_insert = &statement.row_to_insert;
+    let slot = row_slot(table, table.num_rows as usize);
+
+    serialize_row(row_to_insert, slot);
+    table.num_rows += 1;
+    Ok(())
 }
