@@ -117,18 +117,19 @@ const PAGE_SIZE: usize = 4096; //its like this in sqlite
 const TABLE_MAX_PAGES: usize = 100;
 const ROWS_PER_PAGE: usize = PAGE_SIZE / ROW_SIZE;
 
-fn row_slot(table: &mut Table, row_num: usize) -> &mut [u8] {
-    let page_num = row_num / ROWS_PER_PAGE;
+fn cursor_value<'cursor, 'table>(cursor: &'cursor mut Cursor<'table>) -> &'cursor mut [u8] {
+    let row_num = cursor.row_num;
+    let page_num = row_num / ROWS_PER_PAGE as u32;
 
-    let page = get_page(&mut table.pager, page_num).unwrap_or_else(|_| {
+    let page = get_page(&mut cursor.table.pager, page_num as usize).unwrap_or_else(|_| {
         println!("Page doesn't exist");
         exit(1);
     });
 
-    let row_offset = row_num % ROWS_PER_PAGE;
-    let byte_offset = row_offset * ROW_SIZE as usize;
+    let row_offset = row_num % ROWS_PER_PAGE as u32;
+    let byte_offset = row_offset * ROW_SIZE as u32;
 
-    &mut page[byte_offset..(byte_offset + (ROW_SIZE as usize))]
+    &mut page[byte_offset as usize..(byte_offset as usize + (ROW_SIZE as usize))]
 }
 
 fn execute_statement(statement: Statement, table: &mut Table) {
@@ -173,9 +174,10 @@ fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), ()> {
     }
 
     let row_to_insert = &statement.row_to_insert;
-    let slot = row_slot(table, table.num_rows as usize);
 
-    serialize_row(row_to_insert, slot);
+    let mut cursor = table_end(table);
+
+    serialize_row(row_to_insert, cursor_value(&mut cursor));
     table.num_rows += 1;
     Ok(())
 }
@@ -187,15 +189,18 @@ fn print_row(row: &Row) {
     println!("{} {} {}", id, username, email)
 }
 
-fn execute_select(statement: &Statement, table: &mut Table) -> Result<(), ()> {
+fn execute_select(_statement: &Statement, table: &mut Table) -> Result<(), ()> {
+    let mut cursor = table_start(table);
     let mut row: Row = Row {
         id: 0,
         username: [0; USERNAME_SIZE],
         email: [0; EMAIL_SIZE],
     };
-    for i in 0..table.num_rows {
-        deserialize_row(row_slot(table, i as usize), &mut row);
+
+    while !cursor.end_of_table {
+        deserialize_row(cursor_value(&mut cursor), &mut row);
         print_row(&row);
+        cursor_advance(&mut cursor);
     }
 
     Ok(())
@@ -310,4 +315,38 @@ fn pager_flush(pager: &mut Pager, page_num: u32, size: u32) -> Result<(), ()> {
         .map_err(|_| ())?;
 
     Ok(())
+}
+
+struct Cursor<'a> {
+    table: &'a mut Table,
+    row_num: u32,
+    end_of_table: bool,
+}
+
+fn table_start(table: &mut Table) -> Cursor<'_> {
+    let cursor = Cursor {
+        end_of_table: table.num_rows == 0,
+        table,
+        row_num: 0,
+    };
+
+    cursor
+}
+
+fn table_end(table: &mut Table) -> Cursor<'_> {
+    let cursor = Cursor {
+        row_num: table.num_rows,
+        end_of_table: true,
+        table,
+    };
+
+    cursor
+}
+
+fn cursor_advance(cursor: &mut Cursor) {
+    cursor.row_num += 1;
+
+    if cursor.row_num >= cursor.table.num_rows {
+        cursor.end_of_table = true;
+    }
 }
