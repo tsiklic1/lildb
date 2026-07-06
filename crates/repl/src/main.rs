@@ -191,23 +191,40 @@ fn fixed_bytes<const N: usize>(input: &str) -> Result<[u8; N], ()> {
 }
 
 fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), ()> {
-    let node = get_page(&mut table.pager, table.root_page_num as usize).unwrap_or_else(|_| {
-        println!("Page doesn't exits");
-        exit(1);
-    });
+    let num_cells = {
+        let node = get_page(&mut table.pager, table.root_page_num as usize).unwrap_or_else(|_| {
+            println!("Page doesn't exits");
+            exit(1);
+        });
 
-    let num_cells = leaf_node_num_cells(node);
+        let num_cells = leaf_node_num_cells(node);
 
-    if num_cells >= LEAF_NODE_MAX_CELLS as u32 {
-        return Err(());
-    }
+        if num_cells >= LEAF_NODE_MAX_CELLS as u32 {
+            return Err(());
+        }
+
+        num_cells
+    };
 
     let row_to_insert = &statement.row_to_insert;
 
-    // let mut cursor = table_end(table);
     let key_to_insert = row_to_insert.id;
-    let cursor = table_find();
+    let mut cursor = table_find(table, key_to_insert);
+
+    if cursor.cell_num < num_cells {
+        let node =
+            get_page(&mut cursor.table.pager, cursor.page_num as usize).unwrap_or_else(|_| {
+                println!("Page doesn't exits");
+                exit(1);
+            });
+        let key_at_index = leaf_node_key(node, cursor.cell_num);
+        if key_at_index == key_to_insert {
+            return Err(());
+        }
+    }
+
     leaf_node_insert(&mut cursor, row_to_insert.id, row_to_insert);
+
     Ok(())
 }
 
@@ -473,6 +490,7 @@ fn leaf_node_value_mut(node: &mut [u8], cell_num: u32) -> &mut [u8] {
 }
 
 fn initialize_leaf_node(node: &mut [u8]) {
+    set_node_type(node, NodeType::LeafNode);
     set_leaf_node_num_cells(node, 0);
 }
 
@@ -516,6 +534,8 @@ fn print_constants() {
     println!("LEAF_NODE_MAX_CELLS: {}", LEAF_NODE_MAX_CELLS);
 }
 
+// Return the position of the given key.
+// If the key is not present, return the position where it should be inserted
 fn table_find(table: &mut Table, key: u32) -> Cursor {
     let root_page_num = table.root_page_num;
     let root_node = get_page(&mut table.pager, root_page_num as usize).unwrap_or_else(|_| {
@@ -524,7 +544,7 @@ fn table_find(table: &mut Table, key: u32) -> Cursor {
     });
 
     if get_node_type(root_node) == NodeType::LeafNode {
-        let cursor = leaf_node_find(&mut table, root_page_num, key);
+        let cursor = leaf_node_find(table, root_page_num, key);
         return cursor;
     } else {
         println!("Need to implement searching an internal node");
@@ -544,37 +564,50 @@ fn get_node_type(node: &[u8]) -> NodeType {
     }
 }
 
-fn leaf_node_find(table: &mut Table, page_num: u32, key: u32) -> Cursor {
-    let node = get_page(table.pager, page_num).unwrap_or_else(|_| {
-        println!("Page doesn't exist");
-        exit(1);
-    });
+fn set_node_type(node: &mut [u8], node_type: NodeType) {
+    node[NODE_TYPE_OFFSET] = match node_type {
+        NodeType::InternalNode => 0,
+        NodeType::LeafNode => 1,
+    };
+}
 
-    let num_cells = leaf_node_num_cells(node);
-    let cursor = Cursor {
+fn leaf_node_find(table: &mut Table, page_num: u32, key: u32) -> Cursor {
+    let cell_num = {
+        let node = get_page(&mut table.pager, page_num as usize).unwrap_or_else(|_| {
+            println!("Page doesn't exist");
+            exit(1);
+        });
+
+        let num_cells = leaf_node_num_cells(node);
+        // Binary search
+        let mut min_index = 0;
+        let mut one_past_max_index = num_cells;
+        while one_past_max_index != min_index {
+            let index = (min_index + one_past_max_index) / 2;
+            let key_at_index = leaf_node_key(node, index);
+
+            if key == key_at_index {
+                return Cursor {
+                    table,
+                    end_of_table: false,
+                    page_num,
+                    cell_num: index,
+                };
+            }
+            if key < key_at_index {
+                one_past_max_index = index;
+            } else {
+                min_index = index + 1;
+            }
+        }
+
+        min_index
+    };
+
+    Cursor {
         table,
         page_num,
         end_of_table: false,
-        cell_num: 0,
-    };
-
-    // Binary search
-    let min_index = 0;
-    let one_past_max_index = num_cells;
-    while one_past_max_index != min_index {
-        let index = (min_index + one_past_max_index) / 2;
-        let key_at_index = leaf_node_key(node, index);
-        if key == key_at_index {
-            cursor.cell_num = index;
-            return cursor;
-        }
-        if key < key_at_index {
-            one_past_max_index = index;
-        } else {
-            min_index = index + 1;
-        }
+        cell_num,
     }
-
-    cursor.cell_num = min_index;
-    cursor
 }
