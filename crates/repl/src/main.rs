@@ -128,6 +128,20 @@ const PARENT_POINTER_SIZE: usize = std::mem::size_of::<u32>();
 const PARENT_POINTER_OFFSET: usize = IS_ROOT_OFFSET + IS_ROOT_SIZE;
 const COMMON_NODE_HEADER_SIZE: usize = NODE_TYPE_SIZE + IS_ROOT_SIZE + PARENT_POINTER_SIZE;
 
+// Internal Node Header Layout
+const INTERNAL_NODE_NUM_KEYS_SIZE: usize = std::mem::size_of::<u32>();
+const INTERNAL_NODE_NUM_KEYS_OFFSET: usize = COMMON_NODE_HEADER_SIZE;
+const INTERNAL_NODE_RIGHT_CHILD_SIZE: usize = std::mem::size_of::<u32>();
+const INTERNAL_NODE_RIGHT_CHILD_OFFSET: usize =
+    INTERNAL_NODE_NUM_KEYS_OFFSET + INTERNAL_NODE_NUM_KEYS_SIZE;
+const INTERNAL_NODE_HEADER_SIZE: usize =
+    COMMON_NODE_HEADER_SIZE + INTERNAL_NODE_NUM_KEYS_SIZE + INTERNAL_NODE_RIGHT_CHILD_SIZE;
+
+// Internal Node Body Layout
+const INTERNAL_NODE_KEY_SIZE: usize = std::mem::size_of::<u32>();
+const INTERNAL_NODE_CHILD_SIZE: usize = std::mem::size_of::<u32>();
+const INTERNAL_NODE_CELL_SIZE: usize = INTERNAL_NODE_CHILD_SIZE + INTERNAL_NODE_KEY_SIZE;
+
 // Leaf Node Header Layout
 
 const LEAF_NODE_NUM_CELLS_SIZE: usize = std::mem::size_of::<u32>();
@@ -272,6 +286,7 @@ fn db_open(filename: &str) -> Box<Table> {
             exit(1);
         });
         initialize_leaf_node(root_node);
+        set_node_root(root_node, true);
     }
 
     Box::new(table)
@@ -491,6 +506,7 @@ fn leaf_node_value_mut(node: &mut [u8], cell_num: u32) -> &mut [u8] {
 
 fn initialize_leaf_node(node: &mut [u8]) {
     set_node_type(node, NodeType::LeafNode);
+    set_node_root(node, false);
     set_leaf_node_num_cells(node, 0);
 }
 
@@ -717,5 +733,122 @@ fn is_node_root(node: &mut [u8; 4096]) -> bool {
     match node_type {
         NodeType::RootNode => true,
         _ => false,
+    }
+}
+
+fn create_new_root(table: &mut Table, right_child_page_num: u32) {
+    // Handle splitting the root.
+    // Old root copied to new page, becomes left child.
+    // Address of right child passed in.
+    // Re-initialize root page to contain the new root node.
+    // New root node points to two children.
+    let root_page_num = table.root_page_num;
+
+    let mut root_copy = {
+        let root = get_page(&mut table.pager, table.root_page_num as usize).unwrap_or_else(|_| {
+            println!("Page doesn't exist.");
+            exit(1);
+        });
+        root.clone()
+    };
+    let left_child_page_num = get_unused_page_num(&table.pager);
+    {
+        // Left child has data copied from old root
+        let left_child =
+            get_page(&mut table.pager, left_child_page_num as usize).unwrap_or_else(|_| {
+                println!("Page doesn't exist");
+                exit(1);
+            });
+        left_child.copy_from_slice(&root_copy);
+        set_node_root(left_child, false);
+    }
+    initialize_internal_node(&mut root_copy);
+    {
+        let root = get_page(&mut table.pager, root_page_num as usize).unwrap_or_else(|_| {
+            println!("Page doesn't exist");
+            exit(1);
+        });
+        set_node_root(root, true);
+        set_internal_node_num_keys(root, 1);
+    }
+}
+
+fn set_node_root(node: &mut [u8], is_root: bool) {
+    let value: u8 = match is_root {
+        true => 1,
+        false => 0,
+    };
+
+    node[IS_ROOT_OFFSET] = value;
+}
+
+fn initialize_internal_node(node: &mut [u8]) {
+    set_node_type(node, NodeType::InternalNode);
+    set_node_root(node, false);
+    set_node_root(node, false);
+}
+
+fn internal_node_num_keys(node: &[u8]) -> u32 {
+    let start = INTERNAL_NODE_NUM_KEYS_OFFSET;
+    let end = start + INTERNAL_NODE_NUM_KEYS_SIZE;
+    let bytes: [u8; 4] = node[start..end].try_into().unwrap();
+    let value = u32::from_le_bytes(bytes);
+    value
+}
+
+fn set_internal_node_num_keys(node: &mut [u8], num_keys: u32) {
+    let start = INTERNAL_NODE_NUM_KEYS_OFFSET;
+    let end = start + INTERNAL_NODE_NUM_KEYS_SIZE;
+    let bytes = num_keys.to_le_bytes();
+    node[start..end].copy_from_slice(&bytes);
+}
+
+fn internal_node_child(node: &[u8], child_num: u32) -> &[u8] {
+    let num_keys = internal_node_num_keys(node);
+    if child_num > num_keys {
+        println!(
+            "Tried to access child_num {} > num_keys {}",
+            child_num, num_keys
+        );
+        exit(1);
+    } else if child_num == num_keys {
+        return internal_node_right_child(node);
+    } else {
+        return internal_node_cell(node, child_num);
+    };
+}
+
+fn internal_node_right_child(node: &[u8]) -> &[u8] {
+    let start = INTERNAL_NODE_RIGHT_CHILD_OFFSET;
+    let end = start + INTERNAL_NODE_RIGHT_CHILD_SIZE;
+    &node[start..end]
+}
+
+fn internal_node_cell(node: &[u8], cell_num: u32) -> &[u8] {
+    let start = INTERNAL_NODE_HEADER_SIZE + cell_num as usize * INTERNAL_NODE_CELL_SIZE;
+    let end = start + INTERNAL_NODE_CELL_SIZE;
+    &node[start..end]
+}
+
+fn internal_node_key(node: &[u8], key_num: u32) -> u32 {
+    let cell = internal_node_cell(node, key_num);
+    let start = INTERNAL_NODE_CHILD_SIZE;
+    let end = start + INTERNAL_NODE_KEY_SIZE;
+
+    u32::from_le_bytes(cell[start..end].try_into().unwrap())
+}
+
+fn get_node_max_key(node: &[u8]) -> u32 {
+    let node_type = get_node_type(node);
+    match node_type {
+        NodeType::InternalNode => {
+            let num_keys = internal_node_num_keys(node);
+            internal_node_key(node, num_keys - 1)
+        }
+        NodeType::LeafNode => {
+            let num_keys = leaf_node_num_cells(node);
+            leaf_node_key(node, num_keys - 1)
+        }
+        _ => exit(1),
     }
 }
