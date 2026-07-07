@@ -143,6 +143,9 @@ const LEAF_NODE_CELL_SIZE: usize = LEAF_NODE_KEY_SIZE + LEAF_NODE_VALUE_SIZE;
 const LEAF_NODE_SPACE_FOR_CELLS: usize = PAGE_SIZE - LEAF_NODE_HEADER_SIZE;
 const LEAF_NODE_MAX_CELLS: usize = LEAF_NODE_SPACE_FOR_CELLS / LEAF_NODE_CELL_SIZE;
 
+const LEAF_NODE_RIGHT_SPLIT_COUNT: usize = (LEAF_NODE_MAX_CELLS + 1) / 2;
+const LEAF_NODE_LEFT_SPLIT_COUNT: usize = LEAF_NODE_MAX_CELLS + 1 - LEAF_NODE_RIGHT_SPLIT_COUNT;
+
 fn cursor_value<'cursor, 'table>(cursor: &'cursor mut Cursor<'table>) -> &'cursor mut [u8] {
     let page_num = cursor.page_num;
 
@@ -198,10 +201,6 @@ fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), ()> {
         });
 
         let num_cells = leaf_node_num_cells(node);
-
-        if num_cells >= LEAF_NODE_MAX_CELLS as u32 {
-            return Err(());
-        }
 
         num_cells
     };
@@ -504,7 +503,8 @@ fn leaf_node_insert(cursor: &mut Cursor, key: u32, value: &Row) {
     if num_cells >= LEAF_NODE_MAX_CELLS as u32 {
         //Node full
         println!("Need to implement splitting a leaf node.");
-        exit(1);
+        leaf_node_split_and_insert(cursor, key, value);
+        return;
     }
 
     //can be optimized with copy_within()
@@ -610,4 +610,90 @@ fn leaf_node_find(table: &mut Table, page_num: u32, key: u32) -> Cursor {
         end_of_table: false,
         cell_num,
     }
+}
+
+fn leaf_node_split_and_insert(cursor: &mut Cursor, key: u32, value: &Row) {
+    // Create a new node and move half the cells over.
+    // Insert the new value in one of the two nodes.
+    // Update parent or create a new parent.
+
+    let old_page_num = cursor.page_num;
+    let new_page_num = get_unused_page_num(&cursor.table.pager);
+    let mut old_node_copy = {
+        let old_node =
+            get_page(&mut cursor.table.pager, cursor.page_num as usize).unwrap_or_else(|_| {
+                println!("Page doesn't exist.");
+                exit(1);
+            });
+        old_node.clone()
+    };
+    {
+        let mut new_node = get_page(&mut cursor.table.pager, cursor.page_num as usize)
+            .unwrap_or_else(|_| {
+                println!("Page doesn't exist.");
+                exit(1);
+            });
+        initialize_leaf_node(new_node);
+    }
+
+    // All existing keys plus new key should be divided
+    // evenly between old (left) and new (right) nodes.
+    // Starting from the right, move each key to correct position.
+    for i in (0..=LEAF_NODE_MAX_CELLS).rev() {
+        let destination_page_num = if i >= LEAF_NODE_LEFT_SPLIT_COUNT {
+            new_page_num
+        } else {
+            old_page_num
+        };
+
+        let index_within_node = i % LEAF_NODE_LEFT_SPLIT_COUNT;
+
+        if i == cursor.cell_num as usize {
+            let destination_node = get_page(&mut cursor.table.pager, destination_page_num as usize)
+                .unwrap_or_else(|_| {
+                    println!("Page doesn't exist.");
+                    exit(1);
+                });
+
+            let destination = leaf_node_cell_mut(destination_node, index_within_node as u32);
+            serialize_row(value, destination);
+        } else {
+            let source_index = if i > cursor.cell_num as usize {
+                i - 1
+            } else {
+                i
+            };
+
+            let source_cell = leaf_node_cell(&old_node_copy, source_index as u32).to_vec();
+            let destination_node = get_page(&mut cursor.table.pager, destination_page_num as usize)
+                .unwrap_or_else(|_| {
+                    println!("Page doesn't exist");
+                    exit(1);
+                });
+
+            let mut destination =
+                leaf_node_cell_mut(destination_node, index_within_node as u32).to_vec();
+            destination.copy_from_slice(&source_cell);
+        }
+    }
+    {
+        let old_node =
+            get_page(&mut cursor.table.pager, old_page_num as usize).unwrap_or_else(|_| {
+                println!("Page doesn't exist");
+                exit(1);
+            });
+        set_leaf_node_num_cells(old_node, LEAF_NODE_LEFT_SPLIT_COUNT as u32);
+    }
+    {
+        let new_node =
+            get_page(&mut cursor.table.pager, new_page_num as usize).unwrap_or_else(|_| {
+                println!("Page doesn't exist");
+                exit(1);
+            });
+        set_leaf_node_num_cells(new_node, LEAF_NODE_RIGHT_SPLIT_COUNT as u32);
+    }
+}
+
+fn get_unused_page_num(pager: &Pager) -> u32 {
+    pager.num_pages
 }
