@@ -32,6 +32,10 @@ fn main() {
                     println!("Constants: ");
                     print_constants();
                 }
+                ".btree" => {
+                    println!("Tree:");
+                    print_tree(&mut table.pager, table.root_page_num, 0);
+                }
                 _ => println!("Unrecognized meta command: {}.", command),
             },
             //statement
@@ -803,7 +807,7 @@ fn set_internal_node_num_keys(node: &mut [u8], num_keys: u32) {
     node[start..end].copy_from_slice(&bytes);
 }
 
-fn internal_node_child(node: &[u8], child_num: u32) -> &[u8] {
+fn internal_node_child(node: &[u8], child_num: u32) -> u32 {
     let num_keys = internal_node_num_keys(node);
     if child_num > num_keys {
         println!(
@@ -811,11 +815,15 @@ fn internal_node_child(node: &[u8], child_num: u32) -> &[u8] {
             child_num, num_keys
         );
         exit(1);
-    } else if child_num == num_keys {
-        return internal_node_right_child(node);
+    }
+    let child_bytes = if child_num == num_keys {
+        internal_node_right_child(node)
     } else {
-        return internal_node_cell(node, child_num);
+        let cell = internal_node_cell(node, child_num);
+        &cell[0..INTERNAL_NODE_CHILD_SIZE]
     };
+
+    u32::from_le_bytes(child_bytes.try_into().unwrap())
 }
 
 fn internal_node_right_child(node: &[u8]) -> &[u8] {
@@ -850,5 +858,78 @@ fn get_node_max_key(node: &[u8]) -> u32 {
             leaf_node_key(node, num_keys - 1)
         }
         _ => exit(1),
+    }
+}
+
+fn indent(level: u32) {
+    for _ in 0..level {
+        print!("    ");
+    }
+}
+
+fn print_tree(pager: &mut Pager, page_num: u32, indentation_level: u32) {
+    enum TreeNodeInfo {
+        Leaf { keys: Vec<u32> },
+        Internal { keys: Vec<u32>, children: Vec<u32> },
+    }
+
+    let info = {
+        let node = get_page(pager, page_num as usize).unwrap_or_else(|_| {
+            println!("Page doesn't exist");
+            exit(1);
+        });
+
+        match get_node_type(node) {
+            NodeType::LeafNode => {
+                let num_keys = leaf_node_num_cells(node);
+                let mut keys = Vec::new();
+
+                for i in 0..num_keys {
+                    keys.push(leaf_node_key(node, i));
+                }
+
+                TreeNodeInfo::Leaf { keys }
+            }
+            NodeType::InternalNode => {
+                let num_keys = internal_node_num_keys(node);
+                let mut keys = Vec::new();
+                let mut children = Vec::new();
+
+                for i in 0..num_keys {
+                    children.push(internal_node_child(node, i));
+                    keys.push(internal_node_key(node, i));
+                }
+
+                children.push(internal_node_child(node, num_keys));
+
+                TreeNodeInfo::Internal { keys, children }
+            }
+            _ => exit(1),
+        }
+    };
+
+    match info {
+        TreeNodeInfo::Leaf { keys } => {
+            indent(indentation_level);
+            println!("- leaf (size {})", keys.len());
+
+            for key in keys {
+                indent(indentation_level + 1);
+                println!("- {}", key);
+            }
+        }
+        TreeNodeInfo::Internal { keys, children } => {
+            indent(indentation_level);
+            println!("- internal (size {})", keys.len());
+
+            for i in 0..keys.len() {
+                print_tree(pager, children[i], indentation_level + 1);
+
+                indent(indentation_level + 1);
+                println!("- key {}", keys[i]);
+            }
+
+            print_tree(pager, children[keys.len()], indentation_level + 1);
+        }
     }
 }
