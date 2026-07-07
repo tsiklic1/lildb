@@ -426,6 +426,7 @@ fn cursor_advance(cursor: &mut Cursor) {
 enum NodeType {
     LeafNode,
     InternalNode,
+    RootNode,
 }
 
 fn leaf_node_num_cells(node: &[u8]) -> u32 {
@@ -557,6 +558,7 @@ fn get_node_type(node: &[u8]) -> NodeType {
     match value {
         0 => NodeType::InternalNode,
         1 => NodeType::LeafNode,
+        2 => NodeType::RootNode,
         _ => {
             println!("Unknown node type: {}", value);
             exit(1);
@@ -568,6 +570,7 @@ fn set_node_type(node: &mut [u8], node_type: NodeType) {
     node[NODE_TYPE_OFFSET] = match node_type {
         NodeType::InternalNode => 0,
         NodeType::LeafNode => 1,
+        NodeType::RootNode => 2,
     };
 }
 
@@ -692,8 +695,27 @@ fn leaf_node_split_and_insert(cursor: &mut Cursor, key: u32, value: &Row) {
             });
         set_leaf_node_num_cells(new_node, LEAF_NODE_RIGHT_SPLIT_COUNT as u32);
     }
+    {
+        let old_node =
+            get_page(&mut cursor.table.pager, old_page_num as usize).unwrap_or_else(|_| {
+                println!("Page doesn't exist");
+                exit(1);
+            });
+        if is_node_root(old_node) {
+            create_new_root(cursor.table, new_page_num);
+        } else {
+        }
+    }
 }
 
 fn get_unused_page_num(pager: &Pager) -> u32 {
     pager.num_pages
+}
+
+fn is_node_root(node: &mut [u8; 4096]) -> bool {
+    let node_type = get_node_type(node);
+    match node_type {
+        NodeType::RootNode => true,
+        _ => false,
+    }
 }
