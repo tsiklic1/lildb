@@ -1,6 +1,8 @@
+use core::num;
 use std::{
     fs::{File, OpenOptions},
     io::{self, BufRead, Read, Seek, Write},
+    ops::Index,
     process::exit,
 };
 
@@ -150,7 +152,10 @@ const INTERNAL_NODE_CELL_SIZE: usize = INTERNAL_NODE_CHILD_SIZE + INTERNAL_NODE_
 
 const LEAF_NODE_NUM_CELLS_SIZE: usize = std::mem::size_of::<u32>();
 const LEAF_NODE_NUM_CELLS_OFFSET: usize = COMMON_NODE_HEADER_SIZE;
-const LEAF_NODE_HEADER_SIZE: usize = COMMON_NODE_HEADER_SIZE + LEAF_NODE_NUM_CELLS_SIZE;
+const LEAF_NODE_NEXT_LEAF_SIZE: usize = std::mem::size_of::<u32>();
+const LEAF_NODE_NEXT_LEAF_OFFSET: usize = LEAF_NODE_NUM_CELLS_OFFSET + LEAF_NODE_NUM_CELLS_SIZE;
+const LEAF_NODE_HEADER_SIZE: usize =
+    COMMON_NODE_HEADER_SIZE + LEAF_NODE_NUM_CELLS_SIZE + LEAF_NODE_NEXT_LEAF_SIZE;
 
 // Leaf Node Body Layout
 const LEAF_NODE_KEY_SIZE: usize = std::mem::size_of::<u32>();
@@ -393,20 +398,22 @@ struct Cursor<'a> {
 }
 
 fn table_start(table: &mut Table) -> Cursor<'_> {
-    let mut default = [0; 4096];
-    let root_node = get_page(&mut table.pager, table.root_page_num as usize).unwrap_or_else(|_| {
-        println!("Page doesn't exist");
-        exit(1);
-    });
-    let num_cells = leaf_node_num_cells(root_node);
-
-    let cursor = Cursor {
-        page_num: table.root_page_num,
-        end_of_table: num_cells == 0,
-        table,
-        cell_num: 0,
+    let page_num = {
+        let cursor = table_find(table, 0);
+        cursor.page_num
     };
 
+    let num_cells = {
+        let node = get_page(&mut table.pager, page_num as usize).unwrap_or_else(|_| {
+            println!("Page doesn't exist");
+            exit(1);
+        });
+
+        let num_cells = leaf_node_num_cells(node);
+        num_cells
+    };
+    let mut cursor = table_find(table, 0);
+    cursor.end_of_table = num_cells == 0;
     cursor
 }
 
@@ -512,6 +519,7 @@ fn initialize_leaf_node(node: &mut [u8]) {
     set_node_type(node, NodeType::LeafNode);
     set_node_root(node, false);
     set_leaf_node_num_cells(node, 0);
+    set_leaf_node_next_leaf(node, 0); // 0 represents no sibling
 }
 
 fn leaf_node_insert(cursor: &mut Cursor, key: u32, value: &Row) {
@@ -568,8 +576,7 @@ fn table_find(table: &mut Table, key: u32) -> Cursor {
         let cursor = leaf_node_find(table, root_page_num, key);
         return cursor;
     } else {
-        println!("Need to implement searching an internal node");
-        exit(1);
+        return internal_node_find(table, root_page_num, key);
     }
 }
 
@@ -932,4 +939,55 @@ fn print_tree(pager: &mut Pager, page_num: u32, indentation_level: u32) {
             print_tree(pager, children[keys.len()], indentation_level + 1);
         }
     }
+}
+
+fn internal_node_find(table: &mut Table, page_num: u32, key: u32) -> Cursor {
+    let node = get_page(&mut table.pager, page_num as usize).unwrap_or_else(|_| {
+        println!("Page doesn't exist");
+        exit(1);
+    });
+    let num_keys = internal_node_num_keys(node);
+
+    // Binary search to find index of child to search
+    let mut min_index = 0;
+    let mut max_index = num_keys; // there is one more child than key
+
+    while min_index != max_index {
+        let index = (min_index + max_index) / 2;
+        let key_to_right = internal_node_key(node, index);
+        if key_to_right >= key {
+            max_index = index;
+        } else {
+            min_index = index + 1;
+        }
+    }
+
+    let child_num = internal_node_child(node, min_index);
+    let child = get_page(&mut table.pager, child_num as usize).unwrap_or_else(|_| {
+        println!("Page doesn't exist");
+        exit(1);
+    });
+
+    let node_type = get_node_type(child);
+
+    let cursor = match node_type {
+        NodeType::LeafNode => {
+            let leaf_node = leaf_node_find(table, child_num, key);
+            leaf_node
+        }
+        NodeType::InternalNode => {
+            let internal_node = internal_node_find(table, child_num, key);
+            internal_node
+        }
+        _ => exit(1),
+    };
+
+    cursor
+}
+
+fn set_leaf_node_next_leaf(node: &mut [u8], value: u32) {
+    let start = LEAF_NODE_NEXT_LEAF_OFFSET;
+    let end = start + LEAF_NODE_NEXT_LEAF_SIZE;
+    let bytes = value.to_le_bytes();
+    node[start..end].copy_from_slice(&bytes);
 }
