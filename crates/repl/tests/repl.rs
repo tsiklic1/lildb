@@ -1,7 +1,18 @@
+use std::fs;
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn run_script(commands: &[&str]) -> String {
+    let db_path = std::env::temp_dir().join(format!(
+        "lildb-test-{}-{}.db",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time was before unix epoch")
+            .as_nanos()
+    ));
+
     let mut child = Command::new(env!("CARGO_BIN_EXE_repl"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -10,6 +21,7 @@ fn run_script(commands: &[&str]) -> String {
 
     {
         let stdin = child.stdin.as_mut().expect("failed to open stdin");
+        writeln!(stdin, "{}", db_path.display()).expect("failed to write db filename");
         for command in commands {
             writeln!(stdin, "{command}").expect("failed to write command");
         }
@@ -21,6 +33,8 @@ fn run_script(commands: &[&str]) -> String {
         "repl exited with status {:?}",
         output.status.code()
     );
+
+    let _ = fs::remove_file(db_path);
 
     String::from_utf8(output.stdout).expect("repl output was not valid utf-8")
 }
@@ -65,4 +79,85 @@ fn prints_error_message_when_table_is_full() {
     let output = run_script(&command_refs);
 
     assert!(output.contains("lildb > Error: Table full."));
+}
+
+#[test]
+fn allows_printing_out_the_structure_of_a_4_leaf_node_btree() {
+    let output = run_script(&[
+        "insert 18 user18 person18@example.com",
+        "insert 7 user7 person7@example.com",
+        "insert 10 user10 person10@example.com",
+        "insert 29 user29 person29@example.com",
+        "insert 23 user23 person23@example.com",
+        "insert 4 user4 person4@example.com",
+        "insert 14 user14 person14@example.com",
+        "insert 30 user30 person30@example.com",
+        "insert 15 user15 person15@example.com",
+        "insert 26 user26 person26@example.com",
+        "insert 22 user22 person22@example.com",
+        "insert 19 user19 person19@example.com",
+        "insert 2 user2 person2@example.com",
+        "insert 1 user1 person1@example.com",
+        "insert 21 user21 person21@example.com",
+        "insert 11 user11 person11@example.com",
+        "insert 6 user6 person6@example.com",
+        "insert 20 user20 person20@example.com",
+        "insert 5 user5 person5@example.com",
+        "insert 8 user8 person8@example.com",
+        "insert 9 user9 person9@example.com",
+        "insert 3 user3 person3@example.com",
+        "insert 12 user12 person12@example.com",
+        "insert 27 user27 person27@example.com",
+        "insert 17 user17 person17@example.com",
+        "insert 16 user16 person16@example.com",
+        "insert 13 user13 person13@example.com",
+        "insert 24 user24 person24@example.com",
+        "insert 25 user25 person25@example.com",
+        "insert 28 user28 person28@example.com",
+        ".btree",
+        ".exit",
+    ]);
+
+    let expected = "\
+Tree:
+- internal (size 3)
+    - leaf (size 7)
+        - 1
+        - 2
+        - 3
+        - 4
+        - 5
+        - 6
+        - 7
+    - key 7
+    - leaf (size 8)
+        - 8
+        - 9
+        - 10
+        - 11
+        - 12
+        - 13
+        - 14
+        - 15
+    - key 15
+    - leaf (size 7)
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        - 21
+        - 22
+    - key 22
+    - leaf (size 8)
+        - 23
+        - 24
+        - 25
+        - 26
+        - 27
+        - 28
+        - 29
+        - 30";
+
+    assert!(output.contains(expected), "actual output:\n{output}");
 }

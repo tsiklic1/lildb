@@ -1,8 +1,6 @@
-use core::num;
 use std::{
     fs::{File, OpenOptions},
     io::{self, BufRead, Read, Seek, Write},
-    ops::Index,
     process::exit,
 };
 
@@ -147,6 +145,7 @@ const INTERNAL_NODE_HEADER_SIZE: usize =
 const INTERNAL_NODE_KEY_SIZE: usize = std::mem::size_of::<u32>();
 const INTERNAL_NODE_CHILD_SIZE: usize = std::mem::size_of::<u32>();
 const INTERNAL_NODE_CELL_SIZE: usize = INTERNAL_NODE_CHILD_SIZE + INTERNAL_NODE_KEY_SIZE;
+const INTENRAL_NODE_MAX_CELLS: usize = 3;
 
 // Leaf Node Header Layout
 
@@ -444,7 +443,14 @@ fn cursor_advance(cursor: &mut Cursor) {
     cursor.cell_num += 1;
 
     if cursor.cell_num >= leaf_node_num_cells(node) {
-        cursor.end_of_table = true;
+        let next_page_num = leaf_node_next_leaf(node);
+        if next_page_num == 0 {
+            // This was rightmost leaf
+            cursor.end_of_table = true;
+        } else {
+            cursor.page_num = next_page_num;
+            cursor.cell_num = 0;
+        }
     }
 }
 
@@ -531,7 +537,6 @@ fn leaf_node_insert(cursor: &mut Cursor, key: u32, value: &Row) {
 
     if num_cells >= LEAF_NODE_MAX_CELLS as u32 {
         //Node full
-        println!("Need to implement splitting a leaf node.");
         leaf_node_split_and_insert(cursor, key, value);
         return;
     }
@@ -649,7 +654,7 @@ fn leaf_node_split_and_insert(cursor: &mut Cursor, key: u32, value: &Row) {
 
     let old_page_num = cursor.page_num;
     let new_page_num = get_unused_page_num(&cursor.table.pager);
-    let mut old_node_copy = {
+    let old_node_copy = {
         let old_node =
             get_page(&mut cursor.table.pager, cursor.page_num as usize).unwrap_or_else(|_| {
                 println!("Page doesn't exist.");
@@ -657,13 +662,16 @@ fn leaf_node_split_and_insert(cursor: &mut Cursor, key: u32, value: &Row) {
             });
         old_node.clone()
     };
+    let old_max = get_node_max_key(&old_node_copy);
+    let old_node_parent = node_parent(&old_node_copy);
     {
-        let mut new_node = get_page(&mut cursor.table.pager, cursor.page_num as usize)
-            .unwrap_or_else(|_| {
+        let new_node =
+            get_page(&mut cursor.table.pager, new_page_num as usize).unwrap_or_else(|_| {
                 println!("Page doesn't exist.");
                 exit(1);
             });
         initialize_leaf_node(new_node);
+        set_node_parent(new_node, old_node_parent);
     }
 
     // All existing keys plus new key should be divided
@@ -685,7 +693,8 @@ fn leaf_node_split_and_insert(cursor: &mut Cursor, key: u32, value: &Row) {
                     exit(1);
                 });
 
-            let destination = leaf_node_cell_mut(destination_node, index_within_node as u32);
+            set_leaf_node_key(destination_node, index_within_node as u32, key);
+            let destination = leaf_node_value_mut(destination_node, index_within_node as u32);
             serialize_row(value, destination);
         } else {
             let source_index = if i > cursor.cell_num as usize {
@@ -701,8 +710,7 @@ fn leaf_node_split_and_insert(cursor: &mut Cursor, key: u32, value: &Row) {
                     exit(1);
                 });
 
-            let mut destination =
-                leaf_node_cell_mut(destination_node, index_within_node as u32).to_vec();
+            let destination = leaf_node_cell_mut(destination_node, index_within_node as u32);
             destination.copy_from_slice(&source_cell);
         }
     }
@@ -731,6 +739,16 @@ fn leaf_node_split_and_insert(cursor: &mut Cursor, key: u32, value: &Row) {
         if is_node_root(old_node) {
             create_new_root(cursor.table, new_page_num);
         } else {
+            let parent_page_num = node_parent(old_node);
+            let new_max = get_node_max_key(old_node);
+            let parent = get_page(&mut cursor.table.pager, parent_page_num as usize)
+                .unwrap_or_else(|_| {
+                    println!("Page doesn't exist");
+                    exit(1);
+                });
+
+            update_internal_node_key(parent, old_max, new_max);
+            internal_node_insert(cursor.table, parent_page_num, new_page_num);
         }
     }
 }
@@ -739,12 +757,8 @@ fn get_unused_page_num(pager: &Pager) -> u32 {
     pager.num_pages
 }
 
-fn is_node_root(node: &mut [u8; 4096]) -> bool {
-    let node_type = get_node_type(node);
-    match node_type {
-        NodeType::RootNode => true,
-        _ => false,
-    }
+fn is_node_root(node: &[u8]) -> bool {
+    node[IS_ROOT_OFFSET] != 0
 }
 
 fn create_new_root(table: &mut Table, right_child_page_num: u32) {
@@ -755,13 +769,19 @@ fn create_new_root(table: &mut Table, right_child_page_num: u32) {
     // New root node points to two children.
     let root_page_num = table.root_page_num;
 
-    let mut root_copy = {
+    let root_copy = {
         let root = get_page(&mut table.pager, table.root_page_num as usize).unwrap_or_else(|_| {
             println!("Page doesn't exist.");
             exit(1);
         });
         root.clone()
     };
+    let right_child =
+        get_page(&mut table.pager, right_child_page_num as usize).unwrap_or_else(|_| {
+            println!("Page doesn't exist");
+            exit(1);
+        });
+    set_node_parent(right_child, table.root_page_num);
     let left_child_page_num = get_unused_page_num(&table.pager);
     {
         // Left child has data copied from old root
@@ -771,16 +791,20 @@ fn create_new_root(table: &mut Table, right_child_page_num: u32) {
                 exit(1);
             });
         left_child.copy_from_slice(&root_copy);
+        set_node_parent(left_child, table.root_page_num);
         set_node_root(left_child, false);
     }
-    initialize_internal_node(&mut root_copy);
     {
         let root = get_page(&mut table.pager, root_page_num as usize).unwrap_or_else(|_| {
             println!("Page doesn't exist");
             exit(1);
         });
+        initialize_internal_node(root);
         set_node_root(root, true);
         set_internal_node_num_keys(root, 1);
+        set_internal_node_child(root, 0, left_child_page_num);
+        set_internal_node_key(root, 0, get_node_max_key(&root_copy));
+        set_internal_node_right_child(root, right_child_page_num);
     }
 }
 
@@ -796,7 +820,7 @@ fn set_node_root(node: &mut [u8], is_root: bool) {
 fn initialize_internal_node(node: &mut [u8]) {
     set_node_type(node, NodeType::InternalNode);
     set_node_root(node, false);
-    set_node_root(node, false);
+    set_internal_node_num_keys(node, 0);
 }
 
 fn internal_node_num_keys(node: &[u8]) -> u32 {
@@ -833,10 +857,43 @@ fn internal_node_child(node: &[u8], child_num: u32) -> u32 {
     u32::from_le_bytes(child_bytes.try_into().unwrap())
 }
 
+fn set_internal_node_child(node: &mut [u8], child_num: u32, value: u32) {
+    let num_keys = internal_node_num_keys(node);
+    if child_num > num_keys {
+        println!(
+            "Tried to access child_num {} > num_keys {}",
+            child_num, num_keys
+        );
+        exit(1);
+    };
+    let child_bytes = if child_num == num_keys {
+        internal_node_right_child_mut(node)
+    } else {
+        let cell = internal_node_cell_mut(node, child_num);
+        &mut cell[0..INTERNAL_NODE_CHILD_SIZE]
+    };
+
+    let value_bytes = value.to_le_bytes();
+    child_bytes.copy_from_slice(&value_bytes);
+}
+
 fn internal_node_right_child(node: &[u8]) -> &[u8] {
     let start = INTERNAL_NODE_RIGHT_CHILD_OFFSET;
     let end = start + INTERNAL_NODE_RIGHT_CHILD_SIZE;
     &node[start..end]
+}
+
+fn set_internal_node_right_child(node: &mut [u8], value: u32) {
+    let start = INTERNAL_NODE_RIGHT_CHILD_OFFSET;
+    let end = start + INTERNAL_NODE_RIGHT_CHILD_SIZE;
+    let value_bytes = value.to_le_bytes();
+    node[start..end].copy_from_slice(&value_bytes);
+}
+
+fn internal_node_right_child_mut(node: &mut [u8]) -> &mut [u8] {
+    let start = INTERNAL_NODE_RIGHT_CHILD_OFFSET;
+    let end = start + INTERNAL_NODE_RIGHT_CHILD_SIZE;
+    &mut node[start..end]
 }
 
 fn internal_node_cell(node: &[u8], cell_num: u32) -> &[u8] {
@@ -845,12 +902,27 @@ fn internal_node_cell(node: &[u8], cell_num: u32) -> &[u8] {
     &node[start..end]
 }
 
+fn internal_node_cell_mut(node: &mut [u8], cell_num: u32) -> &mut [u8] {
+    let start = INTERNAL_NODE_HEADER_SIZE + cell_num as usize * INTERNAL_NODE_CELL_SIZE;
+    let end = start + INTERNAL_NODE_CELL_SIZE;
+    &mut node[start..end]
+}
+
 fn internal_node_key(node: &[u8], key_num: u32) -> u32 {
     let cell = internal_node_cell(node, key_num);
     let start = INTERNAL_NODE_CHILD_SIZE;
     let end = start + INTERNAL_NODE_KEY_SIZE;
 
     u32::from_le_bytes(cell[start..end].try_into().unwrap())
+}
+
+fn set_internal_node_key(node: &mut [u8], key_num: u32, value: u32) {
+    let cell = internal_node_cell_mut(node, key_num);
+    let start = INTERNAL_NODE_CHILD_SIZE;
+    let end = start + INTERNAL_NODE_KEY_SIZE;
+    let value_bytes = value.to_le_bytes();
+
+    cell[start..end].copy_from_slice(&value_bytes);
 }
 
 fn get_node_max_key(node: &[u8]) -> u32 {
@@ -946,23 +1018,25 @@ fn internal_node_find(table: &mut Table, page_num: u32, key: u32) -> Cursor {
         println!("Page doesn't exist");
         exit(1);
     });
-    let num_keys = internal_node_num_keys(node);
+    // let num_keys = internal_node_num_keys(node);
 
-    // Binary search to find index of child to search
-    let mut min_index = 0;
-    let mut max_index = num_keys; // there is one more child than key
+    // // Binary search
+    // let mut min_index = 0;
+    // let mut max_index = num_keys; // there is one more child than key
 
-    while min_index != max_index {
-        let index = (min_index + max_index) / 2;
-        let key_to_right = internal_node_key(node, index);
-        if key_to_right >= key {
-            max_index = index;
-        } else {
-            min_index = index + 1;
-        }
-    }
+    // while min_index != max_index {
+    //     let index = (min_index + max_index) / 2;
+    //     let key_to_right = internal_node_key(node, index);
+    //     if key_to_right >= key {
+    //         max_index = index;
+    //     } else {
+    //         min_index = index + 1;
+    //     }
+    // }
 
-    let child_num = internal_node_child(node, min_index);
+    let child_index = internal_node_find_child(node, key);
+    let child_num = internal_node_child(node, child_index);
+
     let child = get_page(&mut table.pager, child_num as usize).unwrap_or_else(|_| {
         println!("Page doesn't exist");
         exit(1);
@@ -985,9 +1059,114 @@ fn internal_node_find(table: &mut Table, page_num: u32, key: u32) -> Cursor {
     cursor
 }
 
+fn leaf_node_next_leaf(node: &[u8]) -> u32 {
+    let start = LEAF_NODE_NEXT_LEAF_OFFSET;
+    let end = start + LEAF_NODE_NEXT_LEAF_SIZE;
+    u32::from_le_bytes(node[start..end].try_into().unwrap())
+}
+
 fn set_leaf_node_next_leaf(node: &mut [u8], value: u32) {
     let start = LEAF_NODE_NEXT_LEAF_OFFSET;
     let end = start + LEAF_NODE_NEXT_LEAF_SIZE;
     let bytes = value.to_le_bytes();
     node[start..end].copy_from_slice(&bytes);
+}
+
+fn node_parent(node: &[u8]) -> u32 {
+    let start = PARENT_POINTER_OFFSET;
+    let end = start + PARENT_POINTER_SIZE;
+    u32::from_le_bytes(node[start..end].try_into().unwrap())
+}
+
+fn set_node_parent(node: &mut [u8], value: u32) {
+    let start = PARENT_POINTER_OFFSET;
+    let end = start + PARENT_POINTER_SIZE;
+    let bytes = value.to_le_bytes();
+    node[start..end].copy_from_slice(&bytes);
+}
+
+fn update_internal_node_key(node: &mut [u8], old_key: u32, new_key: u32) {
+    let old_child_index = internal_node_find_child(node, old_key);
+    set_internal_node_key(node, old_child_index, new_key);
+}
+
+fn internal_node_find_child(node: &[u8], key: u32) -> u32 {
+    // Return the index of the child which should contain the given key.
+    let num_keys = internal_node_num_keys(node);
+
+    // Binary search
+    let mut min_index = 0;
+    let mut max_index = num_keys; // there is one more child than key
+
+    while min_index != max_index {
+        let index = (min_index + max_index) / 2;
+        let key_to_right = internal_node_key(node, index);
+        if key_to_right >= key {
+            max_index = index;
+        } else {
+            min_index = index + 1;
+        }
+    }
+
+    min_index
+}
+
+fn internal_node_insert(table: &mut Table, parent_page_num: u32, child_page_num: u32) {
+    // Add a new child/key pair to parent that corresponds to child
+
+    let mut parent = {
+        let parent = get_page(&mut table.pager, parent_page_num as usize).unwrap_or_else(|_| {
+            println!("Page doesn't exist");
+            exit(1);
+        });
+        parent.clone()
+    };
+    let child = get_page(&mut table.pager, child_page_num as usize).unwrap_or_else(|_| {
+        println!("Page doesn't exist");
+        exit(1);
+    });
+    let child_max_key = get_node_max_key(child);
+    let index = internal_node_find_child(&parent, child_max_key);
+
+    let original_num_keys = internal_node_num_keys(&parent);
+    set_internal_node_num_keys(&mut parent, original_num_keys + 1);
+
+    if original_num_keys >= INTENRAL_NODE_MAX_CELLS as u32 {
+        println!("Need to implement splitting ");
+        exit(1);
+    }
+
+    let right_child_page_num =
+        u32::from_le_bytes(internal_node_right_child(&parent).try_into().unwrap());
+    let right_child =
+        get_page(&mut table.pager, right_child_page_num as usize).unwrap_or_else(|_| {
+            println!("Page doesn't exist");
+            exit(1)
+        });
+
+    if child_max_key > get_node_max_key(right_child) {
+        // Replace right child
+        set_internal_node_child(&mut parent, original_num_keys, right_child_page_num);
+        set_internal_node_key(
+            &mut parent,
+            original_num_keys,
+            get_node_max_key(right_child),
+        );
+        set_internal_node_right_child(&mut parent, child_page_num);
+    } else {
+        // Make room for the new cell
+        for i in (index..=original_num_keys).rev() {
+            let source = internal_node_cell(&parent, i - 1).to_vec();
+            let destination = internal_node_cell_mut(&mut parent, i);
+            destination.copy_from_slice(&source);
+        }
+        set_internal_node_child(&mut parent, index, child_page_num);
+        set_internal_node_key(&mut parent, index, child_max_key);
+    }
+
+    let parent_page = get_page(&mut table.pager, parent_page_num as usize).unwrap_or_else(|_| {
+        println!("Page doesn't exist");
+        exit(1);
+    });
+    parent_page.copy_from_slice(&parent);
 }
