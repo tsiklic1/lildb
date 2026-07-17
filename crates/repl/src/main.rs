@@ -168,6 +168,8 @@ const LEAF_NODE_MAX_CELLS: usize = LEAF_NODE_SPACE_FOR_CELLS / LEAF_NODE_CELL_SI
 const LEAF_NODE_RIGHT_SPLIT_COUNT: usize = (LEAF_NODE_MAX_CELLS + 1) / 2;
 const LEAF_NODE_LEFT_SPLIT_COUNT: usize = LEAF_NODE_MAX_CELLS + 1 - LEAF_NODE_RIGHT_SPLIT_COUNT;
 
+const INVALID_PAGE_NUM: u32 = u32::MAX;
+
 fn cursor_value<'cursor, 'table>(cursor: &'cursor mut Cursor<'table>) -> &'cursor mut [u8] {
     let page_num = cursor.page_num;
 
@@ -925,20 +927,20 @@ fn set_internal_node_key(node: &mut [u8], key_num: u32, value: u32) {
     cell[start..end].copy_from_slice(&value_bytes);
 }
 
-fn get_node_max_key(node: &[u8]) -> u32 {
-    let node_type = get_node_type(node);
-    match node_type {
-        NodeType::InternalNode => {
-            let num_keys = internal_node_num_keys(node);
-            internal_node_key(node, num_keys - 1)
-        }
-        NodeType::LeafNode => {
-            let num_keys = leaf_node_num_cells(node);
-            leaf_node_key(node, num_keys - 1)
-        }
-        _ => exit(1),
-    }
-}
+// fn get_node_max_key(node: &[u8]) -> u32 {
+//     let node_type = get_node_type(node);
+//     match node_type {
+//         NodeType::InternalNode => {
+//             let num_keys = internal_node_num_keys(node);
+//             internal_node_key(node, num_keys - 1)
+//         }
+//         NodeType::LeafNode => {
+//             let num_keys = leaf_node_num_cells(node);
+//             leaf_node_key(node, num_keys - 1)
+//         }
+//         _ => exit(1),
+//     }
+// }
 
 fn indent(level: u32) {
     for _ in 0..level {
@@ -1169,4 +1171,126 @@ fn internal_node_insert(table: &mut Table, parent_page_num: u32, child_page_num:
         exit(1);
     });
     parent_page.copy_from_slice(&parent);
+}
+
+fn internal_node_split_and_insert(table: &mut Table, parent_page_num: u32, child_page_num: u32) {
+    let mut old_page_num = parent_page_num;
+    let mut old_node = get_page(&mut table.pager, parent_page_num as usize)
+        .unwrap_or_else(|_| {
+            println!("Page doesn't exist");
+            exit(1);
+        })
+        .to_vec();
+    let old_max = get_node_max_key(&old_node);
+
+    let child = get_page(&mut table.pager, child_page_num as usize).unwrap_or_else(|_| {
+        println!("Page doesn't exist");
+        exit(1);
+    });
+    let child_max = get_node_max_key(child);
+
+    let new_page_num = get_unused_page_num(&table.pager);
+
+    // Declaring a flag before updating pointers which
+    // records whether this operation involves splitting the root -
+    // if it does, we will insert our newly created node during
+    // the step where the table's new root is created. If it does
+    // not, we have to insert the newly created node into its parent
+    // after the old node's keys have been transferred over. We are not
+    // able to do this if the newly created node's parent is not a newly
+    // initialized root node, because in that case its parent may have existing
+    // keys aside from our old node which we are splitting. If that is true, we
+    // need to find a place for our newly created node in its parent, and we
+    // cannot insert it at the correct index if it does not yet have any keys
+
+    let splitting_root = is_node_root(&old_node);
+
+    let parent = if splitting_root {
+        create_new_root(table, new_page_num);
+        let parent = get_page(&mut table.pager, table.root_page_num as usize)
+            .unwrap_or_else(|_| {
+                println!("Page doesn't exist");
+                exit(1);
+            })
+            .to_vec();
+
+        // If we are splitting the root, we need to update old_node to point
+        // to the new root's left child, new_page_num will already point to
+        // the new root's right child
+
+        old_page_num = internal_node_child(&parent, 0);
+        old_node = get_page(&mut table.pager, old_page_num as usize)
+            .unwrap_or_else(|_| {
+                println!("Page doesn't exist");
+                exit(1);
+            })
+            .to_vec();
+        parent
+    } else {
+        let old_node_parent = node_parent(&old_node);
+        let parent = get_page(&mut table.pager, old_node_parent as usize)
+            .unwrap_or_else(|_| {
+                println!("Page doesn't exist");
+                exit(1);
+            })
+            .to_vec();
+        let new_node = get_page(&mut table.pager, new_page_num as usize).unwrap_or_else(|_| {
+            println!("Page doesn't exist");
+            exit(1);
+        });
+        initialize_internal_node(new_node);
+        parent
+    };
+
+    let mut old_num_keys = internal_node_num_keys(&old_node);
+    let mut cur_page_num =
+        u32::from_le_bytes(internal_node_right_child(&old_node).try_into().unwrap());
+    let mut cur = get_page(&mut table.pager, cur_page_num as usize)
+        .unwrap_or_else(|_| {
+            println!("Page doesn't exist");
+            exit(1);
+        })
+        .to_vec();
+
+    // First put right child into new node and set right child of old node to invalid page number
+    internal_node_insert(table, new_page_num, cur_page_num);
+    set_node_parent(&mut cur, new_page_num);
+
+    set_internal_node_right_child(&mut old_node, INVALID_PAGE_NUM);
+
+    // For each key until you get to the middle key, move the key and the child to the new node
+    for i in ((INTENRAL_NODE_MAX_CELLS / 2)..INTENRAL_NODE_MAX_CELLS).rev() {
+        cur_page_num = internal_node_child(&old_node, i as u32);
+        cur = get_page(&mut table.pager, cur_page_num as usize)
+            .unwrap_or_else(|_| {
+                println!("Page doesn't exist");
+                exit(1);
+            })
+            .to_vec();
+        internal_node_insert(table, new_page_num, cur_page_num);
+        set_node_parent(&mut cur, new_page_num);
+
+        old_num_keys -= 1;
+    }
+
+    // Set child before middle key, which is now the highest key, to be node's right child,
+    // and decrement number of keys
+
+    let right_child = internal_node_child(&old_node, old_num_keys - 1);
+    set_internal_node_right_child(&mut old_node, right_child);
+
+    // Determine which of the two nodes after the split should contain the child to be inserted,
+    // and insert the child
+
+    let max_after_split = get_node_max_key();
+}
+
+fn get_node_max_key(mut pager: Pager, node: &[u8]) -> u32 {
+    let node_type = get_node_type(node);
+    if node_type == NodeType::LeafNode {
+        return leaf_node_key(node, leaf_node_num_cells(node));
+    }
+    let child = u32::from_le_bytes(internal_node_right_child(node).try_into().unwrap());
+    let right_child = get_page(&mut pager, child as usize);
+    return get_node_max_key(pager, node);
 }
