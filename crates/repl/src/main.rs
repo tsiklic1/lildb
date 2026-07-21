@@ -4,6 +4,8 @@ use std::{
     process::exit,
 };
 
+use tabled::papergrid::Estimate;
+
 fn main() {
     let stdin = io::stdin();
 
@@ -664,7 +666,7 @@ fn leaf_node_split_and_insert(cursor: &mut Cursor, key: u32, value: &Row) {
             });
         old_node.clone()
     };
-    let old_max = get_node_max_key(&old_node_copy);
+    let old_max = get_node_max_key(&mut cursor.table.pager, &old_node_copy);
     let old_node_parent = node_parent(&old_node_copy);
     {
         let new_node =
@@ -733,16 +735,17 @@ fn leaf_node_split_and_insert(cursor: &mut Cursor, key: u32, value: &Row) {
         set_leaf_node_num_cells(new_node, LEAF_NODE_RIGHT_SPLIT_COUNT as u32);
     }
     {
-        let old_node =
-            get_page(&mut cursor.table.pager, old_page_num as usize).unwrap_or_else(|_| {
+        let old_node = get_page(&mut cursor.table.pager, old_page_num as usize)
+            .unwrap_or_else(|_| {
                 println!("Page doesn't exist");
                 exit(1);
-            });
-        if is_node_root(old_node) {
+            })
+            .to_vec();
+        if is_node_root(&old_node) {
             create_new_root(cursor.table, new_page_num);
         } else {
-            let parent_page_num = node_parent(old_node);
-            let new_max = get_node_max_key(old_node);
+            let parent_page_num = node_parent(&old_node);
+            let new_max = get_node_max_key(&mut cursor.table.pager, &old_node);
             let parent = get_page(&mut cursor.table.pager, parent_page_num as usize)
                 .unwrap_or_else(|_| {
                     println!("Page doesn't exist");
@@ -778,36 +781,70 @@ fn create_new_root(table: &mut Table, right_child_page_num: u32) {
         });
         root.clone()
     };
-    let right_child =
-        get_page(&mut table.pager, right_child_page_num as usize).unwrap_or_else(|_| {
+    let mut right_child = get_page(&mut table.pager, right_child_page_num as usize)
+        .unwrap_or_else(|_| {
             println!("Page doesn't exist");
             exit(1);
-        });
-    set_node_parent(right_child, table.root_page_num);
+        })
+        .to_vec();
+    set_node_parent(&mut right_child, table.root_page_num);
     let left_child_page_num = get_unused_page_num(&table.pager);
-    {
-        // Left child has data copied from old root
-        let left_child =
-            get_page(&mut table.pager, left_child_page_num as usize).unwrap_or_else(|_| {
+
+    // Left child has data copied from old root
+    let mut left_child = get_page(&mut table.pager, left_child_page_num as usize)
+        .unwrap_or_else(|_| {
+            println!("Page doesn't exist");
+            exit(1);
+        })
+        .to_vec();
+    left_child.copy_from_slice(&root_copy);
+    set_node_parent(&mut left_child, table.root_page_num);
+
+    let mut root = get_page(&mut table.pager, root_page_num as usize)
+        .unwrap_or_else(|_| {
+            println!("Page doesn't exist");
+            exit(1);
+        })
+        .to_vec();
+
+    if get_node_type(&root) == NodeType::InternalNode {
+        initialize_internal_node(&mut right_child);
+        initialize_internal_node(&mut left_child);
+    }
+    set_node_root(&mut left_child, false);
+
+    if get_node_type(&left_child) == NodeType::InternalNode {
+        let num_keys = internal_node_num_keys(&left_child);
+        for i in 0..num_keys {
+            let child = get_page(
+                &mut table.pager,
+                internal_node_child(&left_child, i) as usize,
+            )
+            .unwrap_or_else(|_| {
                 println!("Page doesn't exist");
                 exit(1);
             });
-        left_child.copy_from_slice(&root_copy);
-        set_node_parent(left_child, table.root_page_num);
-        set_node_root(left_child, false);
-    }
-    {
-        let root = get_page(&mut table.pager, root_page_num as usize).unwrap_or_else(|_| {
+            set_node_parent(child, left_child_page_num);
+        }
+        let right_child =
+            u32::from_le_bytes(internal_node_right_child(&left_child).try_into().unwrap());
+        let child = get_page(&mut table.pager, right_child as usize).unwrap_or_else(|_| {
             println!("Page doesn't exist");
             exit(1);
         });
-        initialize_internal_node(root);
-        set_node_root(root, true);
-        set_internal_node_num_keys(root, 1);
-        set_internal_node_child(root, 0, left_child_page_num);
-        set_internal_node_key(root, 0, get_node_max_key(&root_copy));
-        set_internal_node_right_child(root, right_child_page_num);
+        set_node_parent(child, left_child_page_num);
     }
+
+    initialize_internal_node(&mut root);
+    set_node_root(&mut root, true);
+    set_internal_node_num_keys(&mut root, 1);
+    set_internal_node_child(&mut root, 0, left_child_page_num);
+    set_internal_node_key(
+        &mut root,
+        0,
+        get_node_max_key(&mut table.pager, &left_child),
+    );
+    set_internal_node_right_child(&mut root, right_child_page_num);
 }
 
 fn set_node_root(node: &mut [u8], is_root: bool) {
@@ -1123,11 +1160,13 @@ fn internal_node_insert(table: &mut Table, parent_page_num: u32, child_page_num:
         });
         parent.clone()
     };
-    let child = get_page(&mut table.pager, child_page_num as usize).unwrap_or_else(|_| {
-        println!("Page doesn't exist");
-        exit(1);
-    });
-    let child_max_key = get_node_max_key(child);
+    let child = &get_page(&mut table.pager, child_page_num as usize)
+        .unwrap_or_else(|_| {
+            println!("Page doesn't exist");
+            exit(1);
+        })
+        .to_vec();
+    let child_max_key = get_node_max_key(&mut table.pager, child);
     let index = internal_node_find_child(&parent, child_max_key);
 
     let original_num_keys = internal_node_num_keys(&parent);
@@ -1140,19 +1179,20 @@ fn internal_node_insert(table: &mut Table, parent_page_num: u32, child_page_num:
 
     let right_child_page_num =
         u32::from_le_bytes(internal_node_right_child(&parent).try_into().unwrap());
-    let right_child =
-        get_page(&mut table.pager, right_child_page_num as usize).unwrap_or_else(|_| {
+    let right_child = get_page(&mut table.pager, right_child_page_num as usize)
+        .unwrap_or_else(|_| {
             println!("Page doesn't exist");
             exit(1)
-        });
+        })
+        .to_vec();
 
-    if child_max_key > get_node_max_key(right_child) {
+    if child_max_key > get_node_max_key(&mut table.pager, &right_child) {
         // Replace right child
         set_internal_node_child(&mut parent, original_num_keys, right_child_page_num);
         set_internal_node_key(
             &mut parent,
             original_num_keys,
-            get_node_max_key(right_child),
+            get_node_max_key(&mut table.pager, &right_child),
         );
         set_internal_node_right_child(&mut parent, child_page_num);
     } else {
@@ -1181,13 +1221,15 @@ fn internal_node_split_and_insert(table: &mut Table, parent_page_num: u32, child
             exit(1);
         })
         .to_vec();
-    let old_max = get_node_max_key(&old_node);
+    let old_max = get_node_max_key(&mut table.pager, &old_node);
 
-    let child = get_page(&mut table.pager, child_page_num as usize).unwrap_or_else(|_| {
-        println!("Page doesn't exist");
-        exit(1);
-    });
-    let child_max = get_node_max_key(child);
+    let mut child = get_page(&mut table.pager, child_page_num as usize)
+        .unwrap_or_else(|_| {
+            println!("Page doesn't exist");
+            exit(1);
+        })
+        .to_vec();
+    let child_max = get_node_max_key(&mut table.pager, &child);
 
     let new_page_num = get_unused_page_num(&table.pager);
 
@@ -1205,7 +1247,7 @@ fn internal_node_split_and_insert(table: &mut Table, parent_page_num: u32, child
 
     let splitting_root = is_node_root(&old_node);
 
-    let parent = if splitting_root {
+    let mut parent = if splitting_root {
         create_new_root(table, new_page_num);
         let parent = get_page(&mut table.pager, table.root_page_num as usize)
             .unwrap_or_else(|_| {
@@ -1234,11 +1276,7 @@ fn internal_node_split_and_insert(table: &mut Table, parent_page_num: u32, child
                 exit(1);
             })
             .to_vec();
-        let new_node = get_page(&mut table.pager, new_page_num as usize).unwrap_or_else(|_| {
-            println!("Page doesn't exist");
-            exit(1);
-        });
-        initialize_internal_node(new_node);
+
         parent
     };
 
@@ -1282,15 +1320,48 @@ fn internal_node_split_and_insert(table: &mut Table, parent_page_num: u32, child
     // Determine which of the two nodes after the split should contain the child to be inserted,
     // and insert the child
 
-    let max_after_split = get_node_max_key();
+    let max_after_split = get_node_max_key(&mut table.pager, &old_node);
+    let destination_page_num = if child_max < max_after_split {
+        old_page_num
+    } else {
+        new_page_num
+    };
+
+    internal_node_insert(table, destination_page_num, child_page_num);
+    set_node_parent(&mut child, destination_page_num);
+
+    update_internal_node_key(
+        &mut parent,
+        old_max,
+        get_node_max_key(&mut table.pager, &old_node),
+    );
+
+    if !splitting_root {
+        let mut new_node = get_page(&mut table.pager, new_page_num as usize)
+            .unwrap_or_else(|_| {
+                println!("Page doesn't exist");
+                exit(1);
+            })
+            .to_vec();
+        initialize_internal_node(&mut new_node);
+
+        let old_node_parent = node_parent(&old_node);
+        internal_node_insert(table, old_node_parent, new_page_num);
+        set_node_parent(&mut new_node, old_node_parent);
+    }
 }
 
-fn get_node_max_key(mut pager: Pager, node: &[u8]) -> u32 {
+fn get_node_max_key(pager: &mut Pager, node: &[u8]) -> u32 {
     let node_type = get_node_type(node);
     if node_type == NodeType::LeafNode {
         return leaf_node_key(node, leaf_node_num_cells(node));
     }
     let child = u32::from_le_bytes(internal_node_right_child(node).try_into().unwrap());
-    let right_child = get_page(&mut pager, child as usize);
-    return get_node_max_key(pager, node);
+    let right_child = get_page(pager, child as usize)
+        .unwrap_or_else(|_| {
+            println!("Page doesn't exist");
+            exit(1);
+        })
+        .to_vec();
+    return get_node_max_key(pager, &right_child);
 }
