@@ -13,11 +13,11 @@ fn run_script(commands: &[&str]) -> String {
             .as_nanos()
     ));
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_repl"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lildb"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
-        .expect("failed to start repl binary");
+        .expect("failed to start lildb binary");
 
     {
         let stdin = child.stdin.as_mut().expect("failed to open stdin");
@@ -30,13 +30,13 @@ fn run_script(commands: &[&str]) -> String {
     let output = child.wait_with_output().expect("failed to read output");
     assert!(
         output.status.success(),
-        "repl exited with status {:?}",
+        "lildb exited with status {:?}",
         output.status.code()
     );
 
     let _ = fs::remove_file(db_path);
 
-    String::from_utf8(output.stdout).expect("repl output was not valid utf-8")
+    String::from_utf8(output.stdout).expect("lildb output was not valid utf-8")
 }
 
 #[test]

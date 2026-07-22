@@ -1,60 +1,13 @@
 use std::{
-    fs::{File, OpenOptions},
-    io::{self, BufRead, Read, Seek, Write},
+    fs::OpenOptions,
+    io::{self, Read, Seek, Write},
     process::exit,
 };
 
-use tabled::papergrid::Estimate;
+use crate::constants::*;
+use crate::types::*;
 
-fn main() {
-    let stdin = io::stdin();
-
-    println!("Enter db filename");
-    let mut filename = String::new();
-    stdin.lock().read_line(&mut filename).unwrap();
-    let mut table = db_open(&filename.trim());
-
-    loop {
-        print!("lildb > ");
-        io::stdout().flush().unwrap();
-
-        let mut command = String::new();
-        stdin.lock().read_line(&mut command).unwrap();
-
-        let command = command.trim();
-
-        match command.as_bytes()[0] {
-            b'.' => match command {
-                //meta command
-                ".exit" => {
-                    db_close(&mut table);
-                    break;
-                }
-                ".constants" => {
-                    println!("Constants: ");
-                    print_constants();
-                }
-                ".btree" => {
-                    println!("Tree:");
-                    print_tree(&mut table.pager, table.root_page_num, 0);
-                }
-                _ => println!("Unrecognized meta command: {}.", command),
-            },
-            //statement
-            _ => {
-                let prepare_result = prepare_statement(command);
-                match prepare_result {
-                    Ok(statement) => {
-                        execute_statement(statement, &mut table);
-                    }
-                    Err(()) => println!("Unrecognized statement keyword: {}", command),
-                }
-            }
-        }
-    }
-}
-
-fn prepare_statement(input: &str) -> Result<Statement, ()> {
+pub(crate) fn prepare_statement(input: &str) -> Result<Statement, ()> {
     let mut statement = Statement {
         statement_type: StatementType::Select,
         row_to_insert: Row {
@@ -94,83 +47,6 @@ fn prepare_statement(input: &str) -> Result<Statement, ()> {
     Err(())
 }
 
-enum StatementType {
-    Insert,
-    Select,
-}
-
-struct Statement {
-    statement_type: StatementType,
-    row_to_insert: Row,
-}
-
-struct Row {
-    id: u32,
-    username: [u8; USERNAME_SIZE],
-    email: [u8; EMAIL_SIZE],
-}
-
-struct Table {
-    pager: Pager,
-    root_page_num: u32,
-}
-
-const ID_SIZE: usize = 4;
-const USERNAME_SIZE: usize = 32;
-const EMAIL_SIZE: usize = 255;
-const ID_OFFSET: usize = 0;
-const USERNAME_OFFSET: usize = ID_OFFSET + ID_SIZE;
-const EMAIL_OFFSET: usize = USERNAME_OFFSET + USERNAME_SIZE;
-const ROW_SIZE: usize = ID_SIZE + USERNAME_SIZE + EMAIL_SIZE;
-
-const PAGE_SIZE: usize = 4096; //its like this in sqlite
-const TABLE_MAX_PAGES: usize = 100;
-
-const NODE_TYPE_SIZE: usize = std::mem::size_of::<u8>();
-const NODE_TYPE_OFFSET: usize = 0;
-const IS_ROOT_SIZE: usize = std::mem::size_of::<u8>();
-const IS_ROOT_OFFSET: usize = NODE_TYPE_SIZE;
-const PARENT_POINTER_SIZE: usize = std::mem::size_of::<u32>();
-const PARENT_POINTER_OFFSET: usize = IS_ROOT_OFFSET + IS_ROOT_SIZE;
-const COMMON_NODE_HEADER_SIZE: usize = NODE_TYPE_SIZE + IS_ROOT_SIZE + PARENT_POINTER_SIZE;
-
-// Internal Node Header Layout
-const INTERNAL_NODE_NUM_KEYS_SIZE: usize = std::mem::size_of::<u32>();
-const INTERNAL_NODE_NUM_KEYS_OFFSET: usize = COMMON_NODE_HEADER_SIZE;
-const INTERNAL_NODE_RIGHT_CHILD_SIZE: usize = std::mem::size_of::<u32>();
-const INTERNAL_NODE_RIGHT_CHILD_OFFSET: usize =
-    INTERNAL_NODE_NUM_KEYS_OFFSET + INTERNAL_NODE_NUM_KEYS_SIZE;
-const INTERNAL_NODE_HEADER_SIZE: usize =
-    COMMON_NODE_HEADER_SIZE + INTERNAL_NODE_NUM_KEYS_SIZE + INTERNAL_NODE_RIGHT_CHILD_SIZE;
-
-// Internal Node Body Layout
-const INTERNAL_NODE_KEY_SIZE: usize = std::mem::size_of::<u32>();
-const INTERNAL_NODE_CHILD_SIZE: usize = std::mem::size_of::<u32>();
-const INTERNAL_NODE_CELL_SIZE: usize = INTERNAL_NODE_CHILD_SIZE + INTERNAL_NODE_KEY_SIZE;
-const INTERNAL_NODE_MAX_CELLS: usize = 3;
-
-// Leaf Node Header Layout
-
-const LEAF_NODE_NUM_CELLS_SIZE: usize = std::mem::size_of::<u32>();
-const LEAF_NODE_NUM_CELLS_OFFSET: usize = COMMON_NODE_HEADER_SIZE;
-const LEAF_NODE_NEXT_LEAF_SIZE: usize = std::mem::size_of::<u32>();
-const LEAF_NODE_NEXT_LEAF_OFFSET: usize = LEAF_NODE_NUM_CELLS_OFFSET + LEAF_NODE_NUM_CELLS_SIZE;
-const LEAF_NODE_HEADER_SIZE: usize =
-    COMMON_NODE_HEADER_SIZE + LEAF_NODE_NUM_CELLS_SIZE + LEAF_NODE_NEXT_LEAF_SIZE;
-
-// Leaf Node Body Layout
-const LEAF_NODE_KEY_SIZE: usize = std::mem::size_of::<u32>();
-const LEAF_NODE_KEY_OFFSET: usize = 0;
-const LEAF_NODE_VALUE_SIZE: usize = ROW_SIZE;
-const LEAF_NODE_VALUE_OFFSET: usize = LEAF_NODE_KEY_OFFSET + LEAF_NODE_KEY_SIZE;
-const LEAF_NODE_CELL_SIZE: usize = LEAF_NODE_KEY_SIZE + LEAF_NODE_VALUE_SIZE;
-const LEAF_NODE_SPACE_FOR_CELLS: usize = PAGE_SIZE - LEAF_NODE_HEADER_SIZE;
-const LEAF_NODE_MAX_CELLS: usize = LEAF_NODE_SPACE_FOR_CELLS / LEAF_NODE_CELL_SIZE;
-
-const LEAF_NODE_RIGHT_SPLIT_COUNT: usize = (LEAF_NODE_MAX_CELLS + 1) / 2;
-const LEAF_NODE_LEFT_SPLIT_COUNT: usize = LEAF_NODE_MAX_CELLS + 1 - LEAF_NODE_RIGHT_SPLIT_COUNT;
-
-const INVALID_PAGE_NUM: u32 = u32::MAX;
 
 fn cursor_value<'cursor, 'table>(cursor: &'cursor mut Cursor<'table>) -> &'cursor mut [u8] {
     let page_num = cursor.page_num;
@@ -183,7 +59,7 @@ fn cursor_value<'cursor, 'table>(cursor: &'cursor mut Cursor<'table>) -> &'curso
     leaf_node_value_mut(page, cursor.cell_num)
 }
 
-fn execute_statement(statement: Statement, table: &mut Table) {
+pub(crate) fn execute_statement(statement: Statement, table: &mut Table) {
     match statement.statement_type {
         StatementType::Insert => {
             if execute_insert(&statement, table).is_err() {
@@ -277,7 +153,7 @@ fn execute_select(_statement: &Statement, table: &mut Table) -> Result<(), ()> {
     Ok(())
 }
 
-fn db_open(filename: &str) -> Box<Table> {
+pub(crate) fn db_open(filename: &str) -> Box<Table> {
     let pager = match pager_open(filename) {
         Ok(pager) => pager,
         Err(()) => {
@@ -302,13 +178,6 @@ fn db_open(filename: &str) -> Box<Table> {
     }
 
     Box::new(table)
-}
-
-struct Pager {
-    file: File,
-    file_length: u32,
-    num_pages: u32,
-    pages: [Option<Box<[u8; PAGE_SIZE]>>; TABLE_MAX_PAGES],
 }
 
 fn pager_open(filename: &str) -> Result<Pager, ()> {
@@ -366,7 +235,7 @@ fn get_page(pager: &mut Pager, page_num: usize) -> Result<&mut [u8; PAGE_SIZE], 
     Ok(pager.pages[page_num].as_mut().unwrap())
 }
 
-fn db_close(table: &mut Table) {
+pub(crate) fn db_close(table: &mut Table) {
     for i in 0..table.pager.num_pages {
         if table.pager.pages[i as usize].is_some() {
             pager_flush(&mut table.pager, i);
@@ -391,13 +260,6 @@ fn pager_flush(pager: &mut Pager, page_num: u32) -> Result<(), ()> {
         .map_err(|_| ())?;
 
     Ok(())
-}
-
-struct Cursor<'a> {
-    table: &'a mut Table,
-    end_of_table: bool,
-    page_num: u32,
-    cell_num: u32,
 }
 
 fn table_start(table: &mut Table) -> Cursor<'_> {
@@ -456,13 +318,6 @@ fn cursor_advance(cursor: &mut Cursor) {
             cursor.cell_num = 0;
         }
     }
-}
-
-#[derive(PartialEq)]
-enum NodeType {
-    LeafNode,
-    InternalNode,
-    RootNode,
 }
 
 fn leaf_node_num_cells(node: &[u8]) -> u32 {
@@ -563,7 +418,7 @@ fn leaf_node_insert(cursor: &mut Cursor, key: u32, value: &Row) {
     serialize_row(value, value_bytes);
 }
 
-fn print_constants() {
+pub(crate) fn print_constants() {
     println!("ROW_SIZE: {}", ROW_SIZE);
     println!("COMMON_NODE_HEADER_SIZE: {}", COMMON_NODE_HEADER_SIZE);
     println!("LEAF_NODE_HEADER_SIZE: {}", LEAF_NODE_HEADER_SIZE);
@@ -1013,7 +868,7 @@ fn indent(level: u32) {
     }
 }
 
-fn print_tree(pager: &mut Pager, page_num: u32, indentation_level: u32) {
+pub(crate) fn print_tree(pager: &mut Pager, page_num: u32, indentation_level: u32) {
     enum TreeNodeInfo {
         Leaf { keys: Vec<u32> },
         Internal { keys: Vec<u32>, children: Vec<u32> },
